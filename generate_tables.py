@@ -57,12 +57,18 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
 
     df_basic = df_basic.rename(columns={"件数(张数,根数,支数)": "件数"})
 
-    for col in ["库龄", "原料最初入库日期(年月日)"]:
+    # 统一列名：已发货的 渠道规格描述 → 渠道规格（与业务库存一致）
+    if "渠道规格描述" in df_shipped.columns:
+        df_shipped = df_shipped.rename(columns={"渠道规格描述": "渠道规格"})
+
+    # 已发货补充缺失列
+    for col in ["库龄", "原料最初入库日期(年月日)", "业务入库日期(年月日)"]:
         if col not in df_shipped.columns:
             df_shipped[col] = np.nan
 
-    if "业务入库日期(年月日)" in df_basic.columns:
-        df_basic = df_basic.drop(columns=["业务入库日期(年月日)"])
+    # 标记数据来源
+    df_basic["_source"] = "basic"
+    df_shipped["_source"] = "shipped"
 
     common_cols = list(set(df_basic.columns) & set(df_shipped.columns))
     log(f"  共同列: {len(common_cols)}")
@@ -72,6 +78,92 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     )
     log(f"  UNION 结果: {df_union.shape[0]} 行")
 
+    # 识别捆包号重叠（同时在两个表中存在）
+    bundle_source_count = df_union.groupby("捆包号")["_source"].transform("nunique")
+    bundle_dup = bundle_source_count > 1
+    dup_count = bundle_dup.sum()
+    if dup_count > 0:
+        log(f"  捆包号重叠: {dup_count} 行")
+
+    mask_basic = df_union["_source"] == "basic"
+    mask_shipped = df_union["_source"] == "shipped"
+    mask_basic_only = mask_basic & ~bundle_dup
+    mask_shipped_only = mask_shipped & ~bundle_dup
+
+    # 规格: basic(含重叠) → 渠道规格; shipped_only → 规格
+    df_union["_规格"] = ""
+    df_union.loc[mask_basic, "_规格"] = (
+        df_union.loc[mask_basic, "渠道规格"].fillna("").astype(str)
+    )
+    df_union.loc[mask_shipped_only, "_规格"] = (
+        df_union.loc[mask_shipped_only, "规格"].fillna("").astype(str)
+    )
+
+    # 首次入库时间: basic(含重叠) → 原料最初入库日期(年月日); shipped_only → 制造出厂发货时间
+    df_union["_首次入库时间"] = ""
+    df_union.loc[mask_basic, "_首次入库时间"] = (
+        df_union.loc[mask_basic, "原料最初入库日期(年月日)"]
+        .fillna("").astype(str)
+    )
+    df_union.loc[mask_shipped_only, "_首次入库时间"] = (
+        df_union.loc[mask_shipped_only, "制造出厂发货时间"]
+        .fillna("").astype(str)
+    )
+
+    # 最近入库日期: basic_only → 业务入库日期(年月日); shipped(含重叠) → 制造出厂发货时间
+    df_union["_最近入库日期"] = ""
+    df_union.loc[mask_basic_only, "_最近入库日期"] = (
+        df_union.loc[mask_basic_only, "业务入库日期(年月日)"]
+        .fillna("").astype(str)
+    )
+    df_union.loc[mask_shipped, "_最近入库日期"] = (
+        df_union.loc[mask_shipped, "制造出厂发货时间"]
+        .fillna("").astype(str)
+    )
+
+    # 重叠行的补充处理: 从对应来源取值
+    if dup_count > 0:
+        basic_dup_map = df_union[mask_basic & bundle_dup].set_index("捆包号")
+        shipped_dup_map = df_union[mask_shipped & bundle_dup].set_index("捆包号")
+        mask_sd = mask_shipped & bundle_dup
+        mask_bd = mask_basic & bundle_dup
+        # shipped重叠行: 规格→渠道规格(basic), 首次→原料最初入库日期(basic)
+        df_union.loc[mask_sd, "_规格"] = (
+            df_union.loc[mask_sd, "捆包号"]
+            .map(basic_dup_map["渠道规格"]).fillna("").astype(str)
+        )
+        df_union.loc[mask_sd, "_首次入库时间"] = (
+            df_union.loc[mask_sd, "捆包号"]
+            .map(basic_dup_map["原料最初入库日期(年月日)"]).fillna("").astype(str)
+        )
+        # basic重叠行: 最近入库日期→制造出厂发货时间(shipped)
+        df_union.loc[mask_bd, "_最近入库日期"] = (
+            df_union.loc[mask_bd, "捆包号"]
+            .map(shipped_dup_map["制造出厂发货时间"]).fillna("").astype(str)
+        )
+
+    # 日期格式化: YYYYMMDDHHMMSS → YYYY-MM-DD, YYYYMM → YYYY-MM
+    def _fmt_date(val):
+        if pd.isna(val) or val == "":
+            return val
+        s = str(val).strip()
+        # 处理 float 转字符串带来的 .0 后缀
+        if s.endswith(".0"):
+            s = s[:-2]
+        # 跳过已格式化的日期
+        if "-" in s:
+            return s
+        if len(s) >= 14:  # YYYYMMDDHHMMSS → YYYY-MM-DD
+            return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+        if len(s) == 8:   # YYYYMMDD → YYYY-MM-DD
+            return f"{s[:4]}-{s[6:8]}-{s[8:10]}"
+        if len(s) == 6:   # YYYYMM → YYYY-MM
+            return f"{s[:4]}-{s[4:6]}"
+        return s
+
+    df_union["_首次入库时间"] = df_union["_首次入库时间"].apply(_fmt_date)
+    df_union["_最近入库日期"] = df_union["_最近入库日期"].apply(_fmt_date)
+
     progress(30, "格式化日期列...")
     if df_union["业务入库日期"].dtype in ("float64", "int64"):
         df_union["业务入库日期"] = df_union["业务入库日期"].apply(
@@ -79,7 +171,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
         )
     if df_union["采购交货期"].dtype in ("float64", "int64"):
         df_union["采购交货期"] = df_union["采购交货期"].apply(
-            lambda x: str(int(x)) if pd.notna(x) else ""
+            lambda x: _fmt_date(x) if pd.notna(x) else ""
         )
 
     # ── 3. 构建订单表 ────────────────────────────────────────
@@ -102,7 +194,9 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "客户零件号": df_order["客户零件号"],
             "订货规格": df_order["规格描述"],
             "订货牌号": df_order["牌号"],
-            "合同月份": df_order["采购交货月"],
+            "合同月份": df_order["采购交货月"].apply(
+                lambda x: _fmt_date(x) if pd.notna(x) else ""
+            ),
             "产销合同号": df_order["供应商订单子项号"],
             "厚度/直径": spec_parts[0],
             "宽度": spec_parts[1],
@@ -150,7 +244,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     )
 
     df_inv = df_inv.merge(
-        df_summary[["SAP", "后处理方式", "精整分流", "订货规格", "宽度"]],
+        df_summary[["SAP", "后处理方式", "精整分流", "订货规格", "宽度", "客户零件号"]],
         left_on="钢厂订单号",
         right_on="SAP",
         how="left",
@@ -159,7 +253,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
 
     progress(60, "计算派生字段...")
 
-    inv_spec_parts = df_inv["规格"].astype(str).str.split("*", n=2, expand=True)
+    inv_spec_parts = df_inv["_规格"].astype(str).str.split("*", n=2, expand=True)
     df_inv["_厚度"] = inv_spec_parts[0]
     df_inv["_宽度"] = inv_spec_parts[1]
 
@@ -187,7 +281,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             return False
 
     df_inv["_套材"] = df_inv.apply(
-        lambda r: _is_taocai(r["规格"], r.get("宽度_汇总")),
+        lambda r: "套材" if _is_taocai(r["_规格"], r.get("宽度_汇总")) else "非套材",
         axis=1,
     )
 
@@ -201,7 +295,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "捆包号": df_inv["捆包号"],
             "物料号": df_inv["物料号"],
             "母卷号": df_inv["母捆包号"],
-            "规格": df_inv["规格"],
+            "规格": df_inv["_规格"],
             "牌号": df_inv["牌号"],
             "入库重量": df_inv["净重(吨)"],
             "入库数量": df_inv["件数"],
@@ -212,9 +306,9 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "封锁类型": df_inv["封锁类型"],
             "库龄": df_inv["库龄"],
             "品种代码": df_inv["品种附属码"],
-            "首次入库时间": df_inv["原料最初入库日期(年月日)"],
-            "最近入库日期": df_inv["业务入库日期"],
-            "客户零件号": df_inv["客户零件号"],
+            "首次入库时间": df_inv["_首次入库时间"],
+            "最近入库日期": df_inv["_最近入库日期"],
+            "客户零件号": df_inv["客户零件号_汇总"].fillna("").astype(str),
             "订货规格": df_inv["_订货规格"],
             "合同月份": contract_month,
             "厚度/直径": df_inv["_厚度"],
@@ -253,7 +347,6 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     for row_idx in range(2, ws_order.max_row + 1):
         cell = ws_order.cell(row=row_idx, column=5)
         if cell.value is not None:
-            cell.value = str(int(cell.value))
             cell.number_format = "@"
 
     ws_inv = wb["库存表"]
@@ -261,7 +354,6 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
         for col_idx in (17, 20):
             cell = ws_inv.cell(row=row_idx, column=col_idx)
             if cell.value is not None:
-                cell.value = str(int(cell.value))
                 cell.number_format = "@"
 
     wb.save(output_path)
@@ -285,7 +377,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     inv_sum_match = df_inv["后处理方式"].notna().sum()
     log(f"库存表 库存→订单汇总 匹配: {inv_sum_match}/{len(df_inv)}")
 
-    taocai_count = df_inv_out["套材"].sum()
+    taocai_count = (df_inv_out["套材"] == "套材").sum()
     log(f"库存表 套材数: {taocai_count}")
 
     progress(100, "完成!")
