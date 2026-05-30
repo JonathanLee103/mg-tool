@@ -150,9 +150,9 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     )
 
     df_inv = df_inv.merge(
-        df_summary[["产销合同号", "后处理方式", "精整分流"]],
+        df_summary[["SAP", "后处理方式", "精整分流", "订货规格", "宽度"]],
         left_on="钢厂订单号",
-        right_on="产销合同号",
+        right_on="SAP",
         how="left",
         suffixes=("", "_汇总"),
     )
@@ -163,35 +163,31 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     df_inv["_厚度"] = inv_spec_parts[0]
     df_inv["_宽度"] = inv_spec_parts[1]
 
-    df_inv["_订货规格"] = (
-        df_inv["牌号"].fillna("").astype(str)
-        + df_inv["规格描述"].fillna("").astype(str)
-        + df_inv["表面质量"].fillna("").astype(str)
-    )
+    # 订货规格：通过 钢厂订单号=SAP 直接从订单汇总获取
+    df_inv["_订货规格"] = df_inv["订货规格"].fillna("").astype(str)
 
-    def _normalize_spec(s):
-        if pd.isna(s):
-            return ""
-        parts = []
-        for seg in str(s).split("*"):
-            seg = seg.strip()
-            try:
-                v = float(seg)
-                normalized = str(v)
-                if normalized.startswith("."):
-                    normalized = "0" + normalized
-            except ValueError:
-                normalized = seg
-            parts.append(normalized)
-        return "*".join(parts)
+    # 套材判断：钢厂订单号=SAP，比较规格与订单汇总.宽度
+    import re
+
+    def _is_taocai(spec_str, summary_width):
+        if pd.isna(spec_str):
+            return False
+        spec_str = str(spec_str).strip()
+        if spec_str.endswith("C"):
+            return False
+        parts = spec_str.split("*")
+        if len(parts) < 2:
+            return False
+        nums = re.findall(r"\d+\.?\d*", parts[1])
+        if not nums or pd.isna(summary_width):
+            return False
+        try:
+            return float(nums[0]) != float(summary_width)
+        except (ValueError, TypeError):
+            return False
 
     df_inv["_套材"] = df_inv.apply(
-        lambda r: (
-            _normalize_spec(r.get("规格描述"))
-            != _normalize_spec(r["规格"])
-        )
-        if pd.notna(r.get("规格描述"))
-        else False,
+        lambda r: _is_taocai(r["规格"], r.get("宽度_汇总")),
         axis=1,
     )
 
