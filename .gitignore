@@ -1,0 +1,25 @@
+# 系统导出文件（大数据，不提交）
+系统导出_*.xlsx
+系统导出_*.xls
+
+# 输出文件
+output_*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
