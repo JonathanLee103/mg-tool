@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
+from datetime import datetime
 
 
 def generate(work_dir=".", log_cb=None, progress_cb=None):
@@ -43,6 +44,10 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
     progress(15, "加载业务库存数据...")
     df_basic = pd.read_excel(os.path.join(work_dir, "系统导出_业务库存数据.xlsx"))
     log(f"  业务库存数据: {df_basic.shape[0]} 行, {df_basic.shape[1]} 列")
+
+    # 构建业务库存库龄映射（捆包号 → 原料库龄）
+    basic_age = df_basic[["捆包号", "原料库龄"]].dropna(subset=["捆包号", "原料库龄"])
+    basic_age_map = basic_age.set_index("捆包号")["原料库龄"]
 
     progress(20, "加载已发货库存明细...")
     df_shipped = pd.read_excel(
@@ -267,8 +272,6 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
         if pd.isna(spec_str):
             return False
         spec_str = str(spec_str).strip()
-        if spec_str.endswith("C"):
-            return False
         parts = spec_str.split("*")
         if len(parts) < 2:
             return False
@@ -287,6 +290,21 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
 
     contract_month = df_inv["采购交货期"].fillna("")
 
+    def _calc_age(row):
+        bundle = row["捆包号"]
+        if bundle in basic_age_map.index:
+            return basic_age_map[bundle]
+        first_in = row["_首次入库时间"]
+        if pd.isna(first_in) or str(first_in) == "":
+            return np.nan
+        try:
+            dt = pd.to_datetime(first_in).date()
+            return (datetime.now().date() - dt).days
+        except Exception:
+            return np.nan
+
+    inventory_age = df_inv.apply(_calc_age, axis=1)
+
     progress(70, "生成库存表...")
 
     df_inv_out = pd.DataFrame(
@@ -304,7 +322,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "仓库名称": df_inv["仓库名称"],
             "捆包状态": df_inv["实物库存状态"],
             "封锁类型": df_inv["封锁类型"],
-            "库龄": df_inv["库龄"],
+            "库龄": inventory_age,
             "品种代码": df_inv["品种附属码"],
             "首次入库时间": df_inv["_首次入库时间"],
             "最近入库日期": df_inv["_最近入库日期"],
