@@ -283,10 +283,12 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
         except (ValueError, TypeError):
             return False
 
-    df_inv["_套材"] = df_inv.apply(
-        lambda r: "套材" if _is_taocai(r["_规格"], r.get("宽度_汇总")) else "非套材",
-        axis=1,
-    )
+    def _taocai_for_row(r):
+        if str(r.get("存货性质", "")).strip() == "成品":
+            return "套材"
+        return "套材" if _is_taocai(r["_规格"], r.get("宽度_汇总")) else "非套材"
+
+    df_inv["_套材"] = df_inv.apply(_taocai_for_row, axis=1)
 
     contract_month = df_inv["采购交货期"].fillna("")
 
