@@ -236,6 +236,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
                 "表面质量",
                 "采购订货重量",
                 "股份终到站港名称",
+                "子项不含税单价",
             ]
         ],
         left_on="钢厂订单号",
@@ -300,6 +301,14 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
 
     inventory_age = df_inv.apply(_calc_age, axis=1)
 
+    def _calc_age_month(age_days):
+        if pd.isna(age_days) or age_days == 0:
+            return "/m_00"
+        q = int(age_days) // 30
+        return f"/m_{q}" if q >= 10 else f"/m_0{q}"
+
+    inventory_age_month = [_calc_age_month(a) for a in inventory_age]
+
     progress(70, "生成库存表...")
 
     df_inv_out = pd.DataFrame(
@@ -315,7 +324,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "供应商合同号子项号": df_inv["钢厂订单号"],
             "客户名称": df_inv["客户名称"],
             "仓库名称": df_inv["仓库名称"],
-            "捆包状态": df_inv["实物库存状态"],
+            "捆包状态": df_inv["在库状态"],
             "封锁类型": df_inv["封锁类型"],
             "库龄": inventory_age,
             "品种代码": df_inv["品种附属码"],
@@ -336,6 +345,10 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "物资类别": df_inv["存货性质"],
             "套材": df_inv["_套材"],
             "业务类型": df_inv["贸易方式"],
+            "采购价格(不含税)": df_inv["子项不含税单价"],
+            "品名（中文）": df_inv["品名（中文）"],
+            "出厂车船号": df_inv["出厂车船号"],
+            "库龄（月）": inventory_age_month,
         }
     )
 
