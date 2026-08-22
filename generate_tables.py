@@ -195,7 +195,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "客户零件号": df_order["客户零件号"],
             "订货规格": df_order["规格描述"],
             "订货牌号": df_order["牌号"],
-            "合同月份": df_order["采购交货月"].apply(
+            "合同月份": df_order["采购交货月（子项）"].apply(
                 lambda x: _fmt_date(x) if pd.notna(x) else ""
             ),
             "产销合同号": df_order["供应商订单子项号"],
@@ -204,7 +204,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "长度": "C",
             "订货重量": df_order["采购订货重量"],
             "表面质量": df_order["表面质量"],
-            "最终用户名称": df_order["最终用户名称"],
+            "最终用户名称": df_order["去向用户名称"],
             "终到站港描述": df_order["股份终到站港名称"],
             "运输方式": df_order["运输方式名称"],
             "后处理方式": df_order["后处理方式"],
@@ -309,6 +309,31 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
 
     inventory_age_month = [_calc_age_month(a) for a in inventory_age]
 
+    # 财务库龄: 通过捆包号在业务库存数据中查找原料库龄, 加上当月剩余天数
+    import calendar
+
+    raw_age_map = df_basic.set_index("捆包号")["原料库龄"].apply(
+        lambda x: pd.to_numeric(x, errors="coerce")
+    )
+    df_inv["_原料库龄"] = df_inv["捆包号"].map(raw_age_map)
+
+    today = datetime.now().date()
+    remaining_days = calendar.monthrange(today.year, today.month)[1] - today.day
+
+    def _calc_fin_age(raw_age):
+        if pd.isna(raw_age):
+            return ""
+        return int(raw_age) + remaining_days
+
+    def _calc_fin_age_month(fin_age_val):
+        if fin_age_val == "":
+            return ""
+        q = int(fin_age_val) // 30
+        return f"/m_0{q}"
+
+    fin_age = df_inv["_原料库龄"].apply(_calc_fin_age)
+    fin_age_month = fin_age.apply(_calc_fin_age_month)
+
     progress(70, "生成库存表...")
 
     df_inv_out = pd.DataFrame(
@@ -349,6 +374,8 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
             "品名（中文）": df_inv["品名（中文）"],
             "出厂车船号": df_inv["出厂车船号"],
             "库龄（月）": inventory_age_month,
+            "财务库龄": fin_age,
+            "财务库龄（月）": fin_age_month,
         }
     )
 
