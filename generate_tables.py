@@ -329,7 +329,7 @@ def generate(work_dir=".", log_cb=None, progress_cb=None):
         if fin_age_val == "":
             return ""
         q = int(fin_age_val) // 30
-        return f"/m_0{q}"
+        return f"/m_{q}" if q >= 10 else f"/m_0{q}"
 
     fin_age = df_inv["_原料库龄"].apply(_calc_fin_age)
     fin_age_month = fin_age.apply(_calc_fin_age_month)
